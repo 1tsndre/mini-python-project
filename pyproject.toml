@@ -1,0 +1,52 @@
+[project]
+name = "mini-python-project"
+version = "1.0.0"
+description = "E-Commerce REST API in Python, a one-to-one port of mini-go-project"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "asyncpg",
+    "bcrypt",
+    "starlette",
+    "grpcio",
+    "protobuf",
+    "pyjwt",
+    "python-dotenv",
+    "python-multipart",
+    "redis",
+    "structlog",
+    "uvicorn",
+]
+
+[dependency-groups]
+dev = [
+    "grpcio-tools",
+    "httpx",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[project.scripts]
+store-service = "store_service.main:run"
+payment-service = "payment_service.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["common", "proto", "store_service", "payment_service"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["proto/payment/*_pb2*.py", "proto/payment/*_pb2*.pyi"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,24 @@
+# Virtual environment, caches and build output
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# env file
+.env
+
+# Uploaded files; the directories themselves are kept with .gitkeep
+/uploads/**
+!/uploads/*/
+!/uploads/*/.gitkeep
+
+# Editor/IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
