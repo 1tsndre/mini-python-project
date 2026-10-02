@@ -1,0 +1,9 @@
+from store_service.model.cart import *  # noqa: F403
+from store_service.model.category import *  # noqa: F403
+from store_service.model.order import *  # noqa: F403
+from store_service.model.payment import *  # noqa: F403
+from store_service.model.product import *  # noqa: F403
+from store_service.model.review import *  # noqa: F403
+from store_service.model.store import *  # noqa: F403
+from store_service.model.user import *  # noqa: F403
+from store_service.model.zero import *  # noqa: F403
