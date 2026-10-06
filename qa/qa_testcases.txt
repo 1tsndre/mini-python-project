@@ -1,0 +1,933 @@
+================================================================================
+QA TEST CASES - mini-python-project
+E-Commerce REST API
+Total: 84 test case
+================================================================================
+
+Description:
+  Automated script: bash qa_test.sh
+  Login rate limit is handled automatically (auto-wait 65s when near the limit).
+  Setup creates fresh fixtures each run (timestamp-based) to avoid conflicts.
+
+Roles:
+  ADMIN   - admin@example.com (seeded in DB)
+  BUYER   - qa_buyer_<ts>@test.com (registered during setup)
+  SELLER  - same user as BUYER after creating a store (re-login)
+  BUYER2  - qa_buyer2_<ts>@test.com (registered during setup, for order/review)
+
+--------------------------------------------------------------------------------
+0. HEALTH (1 test)
+--------------------------------------------------------------------------------
+
+TC-001
+  Name    : GET /health → 200 (status: ok)
+  Method  : GET
+  URL     : /health
+  Auth    : -
+  Body    : -
+  Assert  : HTTP 200
+            data.status = "ok"
+  Purpose : Ensure the service is running and the health endpoint is accessible
+            to a load balancer / container probe without authentication.
+
+--------------------------------------------------------------------------------
+1. AUTH (12 test)
+--------------------------------------------------------------------------------
+
+TC-002
+  Name    : Register valid → 201
+  Method  : POST
+  URL     : /api/v1/auth/register
+  Auth    : -
+  Body    : { "email": "qa_reg_<ts>@test.com", "password": "pass123", "name": "Reg User" }
+  Assert  : HTTP 201
+  Purpose : Registering a new user with valid data should succeed.
+
+TC-003
+  Name    : Register invalid email → 400
+  Method  : POST
+  URL     : /api/v1/auth/register
+  Auth    : -
+  Body    : { "email": "not-an-email", "password": "pass123", "name": "Test" }
+  Assert  : HTTP 400
+            errors[0].field = "email"
+  Purpose : An invalid email format must be rejected with a field error.
+
+TC-004
+  Name    : Register short password → 400
+  Method  : POST
+  URL     : /api/v1/auth/register
+  Auth    : -
+  Body    : { "email": "short@test.com", "password": "abc", "name": "Test" }
+  Assert  : HTTP 400
+            errors[0].field = "password"
+  Purpose : A password shorter than 6 characters must be rejected.
+
+TC-005
+  Name    : Register empty → 400 (3 field errors)
+  Method  : POST
+  URL     : /api/v1/auth/register
+  Auth    : -
+  Body    : {}
+  Assert  : HTTP 400
+            len(errors) = 3  (email, password, name)
+  Purpose : All required fields must be validated at once, not one by one.
+
+TC-006
+  Name    : Register empty name → 400
+  Method  : POST
+  URL     : /api/v1/auth/register
+  Auth    : -
+  Body    : { "email": "noname@test.com", "password": "pass123" }
+  Assert  : HTTP 400
+            errors[0].field = "name"
+  Purpose : The name field is required.
+
+TC-007
+  Name    : Register duplicate → 409 CONFLICT
+  Method  : POST
+  URL     : /api/v1/auth/register
+  Auth    : -
+  Body    : { "email": "<existing BUYER email>", "password": "pass123", "name": "Dup" }
+  Assert  : HTTP 409
+            errors[0].code = "CONFLICT"
+  Purpose : Registering with an already-registered email must be rejected with 409.
+
+TC-008
+  Name    : Login unregistered email → 401
+  Method  : POST
+  URL     : /api/v1/auth/login
+  Auth    : -
+  Body    : { "email": "notexist@qa.com", "password": "pass123" }
+  Assert  : HTTP 401
+            errors[0].code = "UNAUTHORIZED"
+  Purpose : Logging in with an email that was never registered must be rejected.
+
+TC-009
+  Name    : Login empty → 400 (2 field errors)
+  Method  : POST
+  URL     : /api/v1/auth/login
+  Auth    : -
+  Body    : {}
+  Assert  : HTTP 400
+            len(errors) = 2  (email, password)
+  Purpose : The email and password fields are required.
+
+TC-010
+  Name    : Login valid → 200 + access_token
+  Method  : POST
+  URL     : /api/v1/auth/login
+  Auth    : -
+  Body    : { "email": "<BUYER_EMAIL>", "password": "pass123" }
+  Assert  : HTTP 200
+            data.access_token != ""
+  Purpose : Logging in with correct credentials returns a JWT access token.
+
+TC-011
+  Name    : Login wrong password → 401
+  Method  : POST
+  URL     : /api/v1/auth/login
+  Auth    : -
+  Body    : { "email": "<BUYER_EMAIL>", "password": "wrongpass" }
+  Assert  : HTTP 401
+            errors[0].code = "UNAUTHORIZED"
+  Purpose : Logging in with a wrong password must be rejected.
+
+TC-012
+  Name    : Refresh token → 200 + new token
+  Method  : POST
+  URL     : /api/v1/auth/refresh
+  Auth    : -
+  Body    : { "refresh_token": "<BUYER_REFRESH>" }
+  Assert  : HTTP 200
+            data.access_token != ""
+  Purpose : A valid refresh token returns a new access token.
+  Note    : This endpoint uses the authRate limit (120/min), not loginRate —
+            no need for do_auth_post.
+
+TC-013
+  Name    : Refresh without token → 400
+  Method  : POST
+  URL     : /api/v1/auth/refresh
+  Auth    : -
+  Body    : {}
+  Assert  : HTTP 400
+            errors[0].field = "refresh_token"
+  Purpose : The refresh_token field is required.
+
+--------------------------------------------------------------------------------
+2. STORE (7 test)
+--------------------------------------------------------------------------------
+
+TC-014
+  Name    : Create store (buyer → seller) → OK
+  Method  : POST
+  URL     : /api/v1/stores
+  Auth    : Bearer BUYER_TOKEN
+  Body    : { "name": "QA Store <ts>", "description": "Test" }
+  Assert  : STORE_ID != ""  (setup fixture check)
+  Purpose : A buyer who creates a store is automatically promoted to seller.
+
+TC-015
+  Name    : Create store empty name → 400
+  Method  : POST
+  URL     : /api/v1/stores
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "name": "" }
+  Assert  : HTTP 400
+            errors[0].field = "name"
+  Purpose : The name field is required when creating a store.
+
+TC-016
+  Name    : Get store → 200
+  Method  : GET
+  URL     : /api/v1/stores/<STORE_ID>
+  Auth    : -
+  Assert  : HTTP 200
+            data.id = STORE_ID
+  Purpose : Store details are publicly accessible without authentication.
+
+TC-017
+  Name    : Get store invalid UUID → 400
+  Method  : GET
+  URL     : /api/v1/stores/not-a-uuid
+  Auth    : -
+  Assert  : HTTP 400
+            errors[0].code = "VALIDATION_ERROR"
+  Purpose : An invalid UUID path param must be rejected in the handler.
+
+TC-018
+  Name    : Get store not found → 404
+  Method  : GET
+  URL     : /api/v1/stores/00000000-0000-0000-0000-000000000000
+  Auth    : -
+  Assert  : HTTP 404
+  Purpose : A valid UUID for a non-existent store must return 404.
+
+TC-019
+  Name    : Update store (seller) → 200
+  Method  : PUT
+  URL     : /api/v1/stores/<STORE_ID>
+  Auth    : Bearer SELLER_TOKEN
+  Body    : { "name": "QA Store Updated", "description": "Updated" }
+  Assert  : HTTP 200
+            data.name = "QA Store Updated"
+  Purpose : The seller who owns the store can update its data.
+
+TC-020
+  Name    : Update store without auth → 401
+  Method  : PUT
+  URL     : /api/v1/stores/<STORE_ID>
+  Auth    : -
+  Body    : { "name": "Hack" }
+  Assert  : HTTP 401
+  Purpose : Updating a store without a token must be rejected by the auth middleware.
+
+--------------------------------------------------------------------------------
+3. CATEGORY (12 test)
+--------------------------------------------------------------------------------
+
+TC-021
+  Name    : Create category (admin) → OK
+  Method  : POST
+  URL     : /api/v1/categories
+  Auth    : Bearer ADMIN_TOKEN
+  Body    : { "name": "QA Cat <ts>" }
+  Assert  : CAT_ID != ""  (setup fixture check)
+  Purpose : An admin can create a new category.
+
+TC-022
+  Name    : Create category empty name → 400
+  Method  : POST
+  URL     : /api/v1/categories
+  Auth    : Bearer ADMIN_TOKEN
+  Body    : { "name": "" }
+  Assert  : HTTP 400
+            errors[0].field = "name"
+  Purpose : The name field is required when creating a category.
+
+TC-023
+  Name    : Create category duplicate → 409
+  Method  : POST
+  URL     : /api/v1/categories
+  Auth    : Bearer ADMIN_TOKEN
+  Body    : { "name": "QA Cat <ts>" }  (same name as an existing one)
+  Assert  : HTTP 409
+            errors[0].code = "CONFLICT"
+  Purpose : Category names must be unique; duplicates are rejected with 409.
+
+TC-024
+  Name    : Create category without auth → 401
+  Method  : POST
+  URL     : /api/v1/categories
+  Auth    : -
+  Body    : { "name": "Unauth Cat" }
+  Assert  : HTTP 401
+  Purpose : The create-category endpoint requires a valid token.
+
+TC-025
+  Name    : Create category (buyer token) → 403
+  Method  : POST
+  URL     : /api/v1/categories
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "name": "Buyer Cat" }
+  Assert  : HTTP 403
+  Purpose : Only admins can create categories; a buyer is rejected with 403.
+
+TC-026
+  Name    : Get categories → 200 (array, no raw DB error)
+  Method  : GET
+  URL     : /api/v1/categories
+  Auth    : -
+  Assert  : HTTP 200
+            type(data) = list
+  Purpose : The category list is publicly accessible and does not expose raw DB errors.
+
+TC-027
+  Name    : Update category invalid UUID → 400
+  Method  : PUT
+  URL     : /api/v1/categories/not-a-uuid
+  Auth    : Bearer ADMIN_TOKEN
+  Body    : { "name": "Test" }
+  Assert  : HTTP 400
+            errors[0].code = "VALIDATION_ERROR"
+  Purpose : An invalid UUID path param must be rejected.
+
+TC-028
+  Name    : Update category not found → 404
+  Method  : PUT
+  URL     : /api/v1/categories/00000000-0000-0000-0000-000000000000
+  Auth    : Bearer ADMIN_TOKEN
+  Body    : { "name": "Test" }
+  Assert  : HTTP 404
+  Purpose : Updating a non-existent category must return 404.
+
+TC-029
+  Name    : Update category by seller → 403
+  Method  : PUT
+  URL     : /api/v1/categories/<CAT_ID>
+  Auth    : Bearer SELLER_TOKEN
+  Body    : { "name": "Hack" }
+  Assert  : HTTP 403
+  Purpose : Only admins can update categories; other roles are rejected with 403
+            by the RequireRole(admin) middleware.
+
+TC-030
+  Name    : Update category (admin) → 200
+  Method  : PUT
+  URL     : /api/v1/categories/<CAT_ID>
+  Auth    : Bearer ADMIN_TOKEN
+  Body    : { "name": "QA Cat Upd <ts>" }
+  Assert  : HTTP 200
+  Purpose : An admin can update a category name.
+
+TC-031
+  Name    : Delete category not found → 404
+  Method  : DELETE
+  URL     : /api/v1/categories/00000000-0000-0000-0000-000000000000
+  Auth    : Bearer ADMIN_TOKEN
+  Assert  : HTTP 404
+            errors[0].code = "NOT_FOUND"
+  Purpose : Deleting a non-existent category must return 404 with an error code.
+
+TC-032
+  Name    : Delete category (admin) → 200
+  Method  : DELETE
+  URL     : /api/v1/categories/<DEL_CAT_ID>
+  Auth    : Bearer ADMIN_TOKEN
+  Assert  : HTTP 200
+            data.message = "category deleted"
+  Purpose : An admin can delete an existing category.
+
+--------------------------------------------------------------------------------
+4. PRODUCT (12 test)
+--------------------------------------------------------------------------------
+
+TC-033
+  Name    : Create product (seller) → OK
+  Method  : POST
+  URL     : /api/v1/products
+  Auth    : Bearer SELLER_TOKEN
+  Body    : { "name": "QA Product <ts>", "description": "Test",
+              "price": "500000.00", "stock": 20, "category_id": "<CAT_ID>" }
+  Assert  : PROD_ID != ""  (setup fixture check)
+  Purpose : A seller can create a new product.
+
+TC-034
+  Name    : Create product without name → 400
+  Method  : POST
+  URL     : /api/v1/products
+  Auth    : Bearer SELLER_TOKEN
+  Body    : { "price": "100.00", "stock": 1, "category_id": "<CAT_ID>" }
+  Assert  : HTTP 400
+            errors[0].field = "name"
+  Purpose : The name field is required when creating a product.
+
+TC-035
+  Name    : Create product without price → 400
+  Method  : POST
+  URL     : /api/v1/products
+  Auth    : Bearer SELLER_TOKEN
+  Body    : { "name": "Test", "stock": 1, "category_id": "<CAT_ID>" }
+  Assert  : HTTP 400
+            errors[0].field = "price"
+  Purpose : The price field is required when creating a product.
+
+TC-036
+  Name    : Create product without category_id → 400
+  Method  : POST
+  URL     : /api/v1/products
+  Auth    : Bearer SELLER_TOKEN
+  Body    : { "name": "Test", "price": "100.00", "stock": 1 }
+  Assert  : HTTP 400
+            errors[0].field = "category_id"
+  Purpose : The category_id field is required when creating a product.
+
+TC-037
+  Name    : Create product without auth → 401
+  Method  : POST
+  URL     : /api/v1/products
+  Auth    : -
+  Body    : { "name": "X", "price": "100.00", "stock": 1, "category_id": "<CAT_ID>" }
+  Assert  : HTTP 401
+  Purpose : Only an authenticated seller can create a product.
+
+TC-038
+  Name    : Get products list → 200 + pagination
+  Method  : GET
+  URL     : /api/v1/products?page=1&per_page=5
+  Auth    : -
+  Assert  : HTTP 200
+            meta.pagination.current_page = 1
+  Purpose : The product list is publicly accessible and includes pagination metadata.
+
+TC-039
+  Name    : Get product detail → 200
+  Method  : GET
+  URL     : /api/v1/products/<PROD_ID>
+  Auth    : -
+  Assert  : HTTP 200
+            data.id = PROD_ID
+  Purpose : Product details are publicly accessible without authentication.
+
+TC-040
+  Name    : Get product not found → 404
+  Method  : GET
+  URL     : /api/v1/products/00000000-0000-0000-0000-000000000000
+  Auth    : -
+  Assert  : HTTP 404
+  Purpose : A non-existent product must return 404.
+
+TC-041
+  Name    : Search product → 200
+  Method  : GET
+  URL     : /api/v1/products?search=QA%20Product
+  Auth    : -
+  Assert  : HTTP 200
+  Purpose : Product full-text search works without errors.
+
+TC-042
+  Name    : Filter product by category_id → 200
+  Method  : GET
+  URL     : /api/v1/products?category_id=<CAT_ID>
+  Auth    : -
+  Assert  : HTTP 200
+  Purpose : Filtering products by category works without errors.
+
+TC-043
+  Name    : Update product (seller) → 200
+  Method  : PUT
+  URL     : /api/v1/products/<PROD_ID>
+  Auth    : Bearer SELLER_TOKEN
+  Body    : { "name": "QA Product Updated", "price": "450000.00",
+              "stock": 15, "category_id": "<CAT_ID>" }
+  Assert  : HTTP 200
+            data.price = 450000
+  Purpose : The seller who owns the product can update its data.
+
+TC-044
+  Name    : Delete product (seller) → 200
+  Method  : DELETE
+  URL     : /api/v1/products/<DEL_PROD_ID>
+  Auth    : Bearer SELLER_TOKEN
+  Assert  : HTTP 200
+            data.message = "product deleted"
+  Purpose : The seller who owns the product can delete it.
+
+--------------------------------------------------------------------------------
+5. CART (9 test)
+--------------------------------------------------------------------------------
+
+TC-045
+  Name    : Seller access cart → 403
+  Method  : GET
+  URL     : /api/v1/cart
+  Auth    : Bearer SELLER_TOKEN
+  Assert  : HTTP 403
+  Purpose : The cart endpoint is only accessible by buyers; a seller is rejected
+            with 403 by the RequireRole(buyer) middleware.
+
+TC-046
+  Name    : Add cart item quantity 0 → 400
+  Method  : POST
+  URL     : /api/v1/cart/items
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "product_id": "<PROD_ID>", "quantity": 0 }
+  Assert  : HTTP 400
+            errors[0].field = "quantity"
+  Purpose : Quantity 0 must be rejected; a cart item must have a quantity of at least 1.
+
+TC-047
+  Name    : Add cart item negative quantity → 400
+  Method  : POST
+  URL     : /api/v1/cart/items
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "product_id": "<PROD_ID>", "quantity": -1 }
+  Assert  : HTTP 400
+            errors[0].field = "quantity"
+  Purpose : A negative quantity must be rejected by the handler validation.
+
+TC-048
+  Name    : Add item to cart → 200
+  Method  : POST
+  URL     : /api/v1/cart/items
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "product_id": "<PROD_ID>", "quantity": 2 }
+  Assert  : HTTP 200
+            data.items[0].quantity = 2
+  Purpose : Adding an item to the cart with a valid quantity should succeed.
+
+TC-049
+  Name    : Get cart → 200 (1 item)
+  Method  : GET
+  URL     : /api/v1/cart
+  Auth    : Bearer BUYER2_TOKEN
+  Assert  : HTTP 200
+            len(data.items) = 1
+  Purpose : The buyer's cart can be retrieved and contains the added item.
+
+TC-050
+  Name    : Update cart quantity → 200
+  Method  : PUT
+  URL     : /api/v1/cart/items/<PROD_ID>
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "quantity": 3 }
+  Assert  : HTTP 200
+            data.items[0].quantity = 3
+  Purpose : A cart item's quantity can be updated.
+
+TC-051
+  Name    : Update cart item quantity 0 → 400
+  Method  : PUT
+  URL     : /api/v1/cart/items/<PROD_ID>
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "quantity": 0 }
+  Assert  : HTTP 400
+            errors[0].field = "quantity"
+  Purpose : Updating the quantity to 0 must be rejected; use DELETE to remove.
+
+TC-052
+  Name    : Remove cart item → 200 (empty cart)
+  Method  : DELETE
+  URL     : /api/v1/cart/items/<PROD_ID>
+  Auth    : Bearer BUYER2_TOKEN
+  Assert  : HTTP 200
+            len(data.items) = 0
+  Purpose : Removing an item from the cart; after removal the cart is empty.
+
+TC-053
+  Name    : Empty cart updated_at is not zero value
+  Method  : GET
+  URL     : /api/v1/cart
+  Auth    : Bearer BUYER2_TOKEN
+  Assert  : HTTP 200
+            data.updated_at does not contain "0001-01-01"
+  Purpose : A cart that has been populated must not show the zero time
+            (0001-01-01T00:00:00Z) in the updated_at field.
+
+--------------------------------------------------------------------------------
+6. ORDER (18 test)
+--------------------------------------------------------------------------------
+
+TC-054
+  Name    : Checkout without shipping_address → 400
+  Method  : POST
+  URL     : /api/v1/orders
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : {}
+  Assert  : HTTP 400
+            errors[0].field = "shipping_address"
+  Purpose : The shipping_address field is required at checkout.
+
+TC-055
+  Name    : Checkout valid → 201 + shipping_address
+  Method  : POST
+  URL     : /api/v1/orders
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "shipping_address": "123 QA Test St, Jakarta" }
+  Assert  : HTTP 201
+            data[0].shipping_address = "123 QA Test St, Jakarta"
+  Purpose : Checkout with complete data successfully creates a new order.
+  Note    : The "data" response is an ARRAY of orders (one order per store).
+            BUYER2's cart only has items from 1 store → data contains 1 order (data[0]).
+
+TC-056
+  Name    : Order auto-paid via NSQ
+  Method  : GET
+  URL     : /api/v1/orders/<ORDER_ID>
+  Auth    : Bearer BUYER2_TOKEN
+  Assert  : HTTP 200
+            data.status = "paid"
+  Purpose : After checkout, the order is processed by payment-service via NSQ
+            and the status changes to "paid" within a few seconds.
+  Note    : The script polls the status until terminal (not a fixed sleep). Mock
+            payment succeeds 90% of the time; if this order happens to fail
+            ('cancelled'), the script creates a new order and retries until 'paid'
+            (max 4x) so the status-flow tests below are deterministic.
+
+TC-056a
+  Name    : Get order payment status (gRPC) → 200 success
+  Method  : GET
+  URL     : /api/v1/orders/<ORDER_ID>/payment
+  Auth    : Bearer BUYER2_TOKEN
+  Assert  : HTTP 200
+            data.status = "success"
+  Purpose : store-service queries payment-service synchronously over gRPC for the
+            payment-processor record of an order (async write via NSQ, sync read
+            via gRPC). The order was paid, so the processor status is "success".
+
+TC-056b
+  Name    : Get payment status invalid UUID → 400
+  Method  : GET
+  URL     : /api/v1/orders/not-a-uuid/payment
+  Auth    : Bearer BUYER2_TOKEN
+  Assert  : HTTP 400
+            errors[0].code = "VALIDATION_ERROR"
+  Purpose : An invalid UUID path param is rejected in the handler before the gRPC call.
+
+TC-057
+  Name    : List orders (buyer) → 200
+  Method  : GET
+  URL     : /api/v1/orders
+  Auth    : Bearer BUYER2_TOKEN
+  Assert  : HTTP 200
+            len(data) >= 1
+  Purpose : A buyer can view the list of their own orders.
+
+TC-058
+  Name    : List seller orders → 200
+  Method  : GET
+  URL     : /api/v1/seller/orders
+  Auth    : Bearer SELLER_TOKEN
+  Assert  : HTTP 200
+  Purpose : A seller can view the list of incoming orders for their products.
+
+TC-059
+  Name    : Update order status → processing
+  Method  : PUT
+  URL     : /api/v1/orders/<ORDER_ID>/status
+  Auth    : Bearer SELLER_TOKEN
+  Body    : { "status": "processing" }
+  Assert  : HTTP 200
+  Purpose : A seller can advance the order status from "paid" to "processing".
+
+TC-060
+  Name    : Update order status → shipping
+  Method  : PUT
+  URL     : /api/v1/orders/<ORDER_ID>/status
+  Auth    : Bearer SELLER_TOKEN
+  Body    : { "status": "shipping" }
+  Assert  : HTTP 200
+  Purpose : A seller can advance the order status from "processing" to "shipping".
+
+TC-061
+  Name    : Update order status empty field → 400
+  Method  : PUT
+  URL     : /api/v1/orders/<ORDER_ID>/status
+  Auth    : Bearer SELLER_TOKEN
+  Body    : {}
+  Assert  : HTTP 400
+            errors[0].field = "status"
+  Purpose : The status field is required when updating an order's status.
+
+TC-062
+  Name    : Cancel order (shipping) → 400 INVALID_STATUS
+  Method  : PUT
+  URL     : /api/v1/orders/<ORDER_ID>/cancel
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : -
+  Assert  : HTTP 400
+            errors[0].code = "INVALID_STATUS"
+  Purpose : An order already in "shipping" cannot be cancelled. Cancellation is
+            only allowed up to "processing".
+
+TC-063
+  Name    : Cancel order (pending) → 200
+  Method  : PUT
+  URL     : /api/v1/orders/<ORDER2_ID>/cancel
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : -
+  Assert  : HTTP 200
+            data.message = "order cancelled"
+  Purpose : An order still in "pending" can be cancelled by the buyer.
+
+TC-064
+  Name    : Checkout empty cart → 400
+  Method  : POST
+  URL     : /api/v1/orders
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "shipping_address": "1 Empty Cart St" }
+  Assert  : HTTP 400
+  Purpose : Cannot checkout with an empty cart. BUYER2's cart was emptied after
+            ORDER2 was checked out in TC-063.
+
+TC-065
+  Name    : Get order invalid UUID → 400
+  Method  : GET
+  URL     : /api/v1/orders/not-a-uuid
+  Auth    : Bearer BUYER2_TOKEN
+  Assert  : HTTP 400
+            errors[0].code = "VALIDATION_ERROR"
+  Purpose : An invalid UUID path param must be rejected in the handler.
+
+TC-066
+  Name    : Update order status invalid transition → 400
+  Method  : PUT
+  URL     : /api/v1/orders/<ORDER2_ID>/status
+  Auth    : Bearer SELLER_TOKEN
+  Body    : { "status": "processing" }
+  Assert  : HTTP 400
+  Purpose : Cannot advance the status of an order that is already "cancelled".
+            Invalid status transitions must be rejected.
+
+TC-067
+  Name    : Cancel order invalid UUID → 400
+  Method  : PUT
+  URL     : /api/v1/orders/not-a-uuid/cancel
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : -
+  Assert  : HTTP 400
+            errors[0].code = "VALIDATION_ERROR"
+  Purpose : An invalid UUID path param must be rejected in the handler.
+
+TC-067a
+  Name    : Checkout multi-store → 201 + 2 orders (1 per store)
+  Method  : POST
+  URL     : /api/v1/orders
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "shipping_address": "1 Multi Store St" }
+  Setup   : BUYER2's cart contains PROD_ID (store STORE_ID) + PROD2_ID (store STORE2_ID).
+  Assert  : HTTP 201
+            len(data) = 2
+            each order has exactly 1 item
+            { data[0].store_id, data[1].store_id } = { STORE_ID, STORE2_ID }
+  Purpose : Prove fix B — a single multi-store checkout is split into one order
+            per store (not one combined order).
+
+TC-067b
+  Name    : Seller2 /seller/orders → only its own store items
+  Method  : GET
+  URL     : /api/v1/seller/orders
+  Auth    : Bearer SELLER2_TOKEN
+  Body    : -
+  Assert  : HTTP 200
+            all data[].store_id = STORE2_ID
+            items contain PROD2_ID and do NOT contain PROD_ID (other store)
+  Purpose : Prove inter-seller isolation — a seller only sees their own store's
+            orders/items, with no leakage of other stores' items.
+
+--------------------------------------------------------------------------------
+7. REVIEW (6 test)
+--------------------------------------------------------------------------------
+
+TC-068
+  Name    : Review rating 0 → 400
+  Method  : POST
+  URL     : /api/v1/products/<PROD_ID>/reviews
+  Auth    : Bearer BUYER_TOKEN
+  Body    : { "rating": 0 }
+  Assert  : HTTP 400
+            errors[0].field = "rating"
+  Purpose : Rating 0 (below the minimum of 1) must be rejected by the handler validation.
+
+TC-069
+  Name    : Review without purchase → 403
+  Method  : POST
+  URL     : /api/v1/products/<PROD_ID>/reviews
+  Auth    : Bearer BUYER_TOKEN
+  Body    : { "rating": 5 }
+  Assert  : HTTP 403
+            errors[0].code = "FORBIDDEN"
+  Purpose : A buyer who has not purchased the product cannot submit a review.
+  Note    : BUYER_TOKEN is different from BUYER2_TOKEN. Only BUYER2 purchased this
+            product. BUYER_TOKEN will be rejected in the service layer.
+
+TC-070
+  Name    : Review valid (after shipped) → 201
+  Method  : POST
+  URL     : /api/v1/products/<PROD_ID>/reviews
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "rating": 4, "comment": "Good product" }
+  Assert  : HTTP 201
+            data.rating = 4
+  Purpose : A review can be created after the order reaches "shipped".
+  Note    : The script updates ORDER_ID to "shipped" before this test.
+
+TC-071
+  Name    : Review duplicate → 409 CONFLICT
+  Method  : POST
+  URL     : /api/v1/products/<PROD_ID>/reviews
+  Auth    : Bearer BUYER2_TOKEN
+  Body    : { "rating": 3 }
+  Assert  : HTTP 409
+            errors[0].code = "CONFLICT"
+  Purpose : A buyer may only submit one review per product. A second review for
+            the same product must be rejected.
+
+TC-072
+  Name    : Review rating > 5 → 400
+  Method  : POST
+  URL     : /api/v1/products/<PROD_ID>/reviews
+  Auth    : Bearer BUYER_TOKEN
+  Body    : { "rating": 6 }
+  Assert  : HTTP 400
+            errors[0].field = "rating"
+  Purpose : A rating above 5 (the maximum) must be rejected by the handler validation.
+
+TC-073
+  Name    : List reviews → 200 + pagination
+  Method  : GET
+  URL     : /api/v1/products/<PROD_ID>/reviews
+  Auth    : -
+  Assert  : HTTP 200
+            meta.pagination.total_items >= 1
+  Purpose : The product review list is publicly accessible and includes pagination.
+
+--------------------------------------------------------------------------------
+8. ERROR CASES (7 test)
+--------------------------------------------------------------------------------
+
+TC-074
+  Name    : 404 unknown endpoint → JSON NOT_FOUND
+  Method  : GET
+  URL     : /api/v1/endpoint-does-not-exist
+  Auth    : -
+  Assert  : HTTP 404
+            errors[0].code = "NOT_FOUND"
+  Purpose : An unregistered endpoint must return JSON 404, not the default plain
+            text from Go's net/http mux.
+
+TC-075
+  Name    : Invalid UUID path param (product) → 400
+  Method  : GET
+  URL     : /api/v1/products/not-a-uuid
+  Auth    : -
+  Assert  : HTTP 400
+            errors[0].code = "VALIDATION_ERROR"
+  Purpose : A non-UUID string in a path param must be rejected with 400, not 500
+            or a panic.
+
+TC-076
+  Name    : Token invalid → 401 UNAUTHORIZED
+  Method  : GET
+  URL     : /api/v1/cart
+  Auth    : Bearer invalid.token.here
+  Assert  : HTTP 401
+            errors[0].code = "UNAUTHORIZED"
+  Purpose : An invalid JWT (malformed/expired/bad signature) must be rejected by
+            the auth middleware.
+
+TC-077
+  Name    : Bad Authorization format → 401
+  Method  : GET
+  URL     : /api/v1/cart
+  Auth    : justtoken  (without "Bearer " prefix)
+  Assert  : HTTP 401
+  Purpose : An Authorization header that does not follow the "Bearer <token>"
+            format must be rejected by the auth middleware.
+
+TC-078
+  Name    : Seller access buyer endpoint → 403
+  Method  : GET
+  URL     : /api/v1/cart
+  Auth    : Bearer SELLER_TOKEN
+  Assert  : HTTP 403
+            errors[0].code = "FORBIDDEN"
+  Purpose : An endpoint requiring the buyer role must reject a seller with 403.
+            The role check is done by the RequireRole middleware.
+
+TC-079
+  Name    : Body not JSON → 400
+  Method  : POST
+  URL     : /api/v1/auth/login
+  Auth    : -
+  Body    : not json  (plain text)
+  Assert  : HTTP 400
+  Purpose : A request body that is not valid JSON must be rejected by json.Decoder.
+
+TC-080
+  Name    : Rate limit login (11th) → 429
+  Method  : POST (11x)
+  URL     : /api/v1/auth/login
+  Auth    : -
+  Body    : { "email": "x@x.com", "password": "wrong" }
+  Assert  : HTTP 429 on the 11th request
+  Purpose : The login rate limiter (10 req/min sliding window via Redis) must block
+            the 11th request within the same window with 429.
+
+================================================================================
+ORDER FLOW UNDER TEST
+================================================================================
+
+  pending
+    │ checkout valid (TC-055)
+    ▼
+  paid  ◄── NSQ payment pipeline (TC-056)
+    │ update status → processing (TC-059)
+    ▼
+  processing
+    │ update status → shipping (TC-060)
+    ▼
+  shipping
+    │ update status → shipped (done in TC-070 setup)
+    ▼
+  shipped
+    │ review can be created (TC-070)
+    ▼
+  (completed — not tested, requires buyer confirmation)
+
+  Cancel flow:
+    pending → cancel OK (TC-063)
+    shipping → cancel REJECTED (TC-062)
+    cancelled → update status REJECTED (TC-066)
+
+================================================================================
+RATE LIMIT VALIDATION
+================================================================================
+
+  Endpoint             Rate Limit    Type
+  ------------------   ----------    -------
+  POST /auth/login     10 req/min    loginRate  (sliding window Redis)
+  POST /auth/register  10 req/min    loginRate  (same bucket as login)
+  POST /auth/refresh   120 req/min   authRate
+  Public endpoint      60 req/min    publicRate
+  Auth'd endpoint      120 req/min   authRate
+
+  The script counts loginRate calls via a file counter (RATE_FILE).
+  Auto-waits 65 seconds when the counter approaches 9 (margin of 1 from the limit of 10).
+
+================================================================================
+ENVIRONMENT
+================================================================================
+
+  Service     : uv run store-service
+  Base URL    : http://localhost:8080  (default, can be overridden via arg)
+  Database    : PostgreSQL (must be running before the service starts)
+  Cache       : Redis (must be running)
+  Messaging   : NSQ nsqd + nsqlookupd (must be running for TC-056)
+  Payment Svc : uv run payment-service (must be running for TC-056)
+
+  Run: bash qa_test.sh
+  Or : bash qa_test.sh http://localhost:9090  (custom base URL)
+
+================================================================================
