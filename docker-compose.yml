@@ -1,0 +1,126 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-mini_python_ecommerce}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nsqlookupd:
+    image: nsqio/nsq:v1.3.0
+    restart: always
+    command: /nsqlookupd
+    ports:
+      - "${NSQLOOKUPD_TCP_HOST_PORT:-4160}:4160"
+      - "${NSQLOOKUPD_HTTP_HOST_PORT:-4161}:4161"
+
+  nsqd:
+    image: nsqio/nsq:v1.3.0
+    restart: always
+    command: /nsqd --lookupd-tcp-address=nsqlookupd:4160 --broadcast-address=nsqd
+    depends_on:
+      - nsqlookupd
+    ports:
+      - "${NSQD_TCP_HOST_PORT:-4150}:4150"
+      - "${NSQD_HTTP_HOST_PORT:-4151}:4151"
+
+  nsqadmin:
+    image: nsqio/nsq:v1.3.0
+    restart: always
+    command: /nsqadmin --lookupd-http-address=nsqlookupd:4161
+    depends_on:
+      - nsqlookupd
+    ports:
+      - "${NSQADMIN_HOST_PORT:-4171}:4171"
+
+  payment-service:
+    image: ${DOCKERHUB_USERNAME:-1tsndre}/mini-python-payment-service:latest
+    restart: always
+    env_file:
+      - .env.example
+    environment:
+      NSQ_LOOKUPD_ADDR: nsqlookupd:4161
+      NSQD_ADDR: nsqd:4150
+      PAYMENT_GRPC_PORT: 50051
+    depends_on:
+      - nsqlookupd
+      - nsqd
+    ports:
+      - "${PAYMENT_GRPC_PORT:-50051}:50051"
+
+  migrate:
+    image: migrate/migrate:latest
+    restart: "no"
+    volumes:
+      - ./migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-mini_python_ecommerce}?sslmode=${DB_SSLMODE:-disable}"
+      - "up"
+
+  store-service:
+    image: ${DOCKERHUB_USERNAME:-1tsndre}/mini-python-store-service:latest
+    restart: always
+    env_file:
+      - .env.example
+    environment:
+      APP_PORT: 8080
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-mini_python_ecommerce}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      NSQ_LOOKUPD_ADDR: nsqlookupd:4161
+      NSQD_ADDR: nsqd:4150
+      PAYMENT_GRPC_ADDR: payment-service:50051
+      JWT_SECRET: ${JWT_SECRET:-local-dev-only-jwt-secret-do-not-use-in-production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      nsqlookupd:
+        condition: service_started
+      nsqd:
+        condition: service_started
+      payment-service:
+        condition: service_started
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      - uploads-data:/app/uploads
+
+volumes:
+  postgres-data:
+  redis-data:
+  uploads-data:
